@@ -1,0 +1,19 @@
+{
+ "cosmetic": 23820,
+ "host": 93432,
+ "host-exception": 62,
+ "host-promoted": 142,
+ "out:host-rules": 93629,
+ "out:rules-ads": 7262,
+ "out:rules-cosmetic": 5474,
+ "out:rules-privacy": 9171,
+ "site-allowlist": 4,
+ "skip:cosmetic-advanced": 658,
+ "skip:cosmetic-domain": 307,
+ "skip:cosmetic-procedural": 11,
+ "skip:option": 215,
+ "skip:pattern": 3,
+ "skip:regex": 29,
+ "wk-block": 15058,
+ "wk-exception": 1371
+}
