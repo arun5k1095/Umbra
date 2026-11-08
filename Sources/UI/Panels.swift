@@ -24,7 +24,7 @@ struct ShieldPanel: View {
                 Spacer()
                 Toggle("", isOn: Binding(get: { on }, set: { v in
                     if v { settings.shieldsOff.remove(site) } else { settings.shieldsOff.insert(site) }
-                    ContainerManager.shared.existing(for: site)?.apply()
+                    ContainerManager.shared.apply(site: site)
                     tab.reload()
                 })).toggleStyle(.switch).labelsHidden().disabled(site.isEmpty)
                     .help("Turn protections off if this site doesn't work")
@@ -71,12 +71,18 @@ struct ShieldPanel: View {
             VStack(alignment: .leading, spacing: 8) {
                 InfoRow(symbol: tab.isSecure ? "lock.fill" : "lock.open.fill", color: tab.isSecure ? .green : .orange,
                         text: tab.isSecure ? "Encrypted connection (HTTPS)" : "This page isn't fully encrypted")
-                InfoRow(symbol: settings.dns == .system ? "network" : "lock.shield", color: settings.dns == .system ? .orange : .green,
-                        text: settings.dns == .system ? "DNS lookups aren't encrypted" : "DNS encrypted via \(settings.dns.shortName)")
+                if tab.tor {
+                    InfoRow(symbol: "network.badge.shield.half.filled", color: .tor,
+                            text: "Through Tor on this site's own circuit. The site sees a Tor address, and your network sees only Tor.")
+                } else {
+                    InfoRow(symbol: settings.dns == .system ? "network" : "lock.shield", color: settings.dns == .system ? .orange : .green,
+                            text: settings.dns == .system ? "DNS lookups aren't encrypted" : "DNS encrypted via \(settings.dns.shortName)")
+                }
                 InfoRow(symbol: "square.on.square.dashed", color: .green, text: "Sealed off from other sites' cookies")
                 if on && settings.fingerprintProtection { InfoRow(symbol: "hand.raised.fill", color: .green, text: "Fingerprinting made harder") }
             }
 
+            if !tab.tor {
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 Toggle(isOn: Binding(get: { remembered }, set: { v in
@@ -95,6 +101,7 @@ struct ShieldPanel: View {
                     tab.reopenInFreshContainer()
                 } label: { Label("Forget this site now", systemImage: "trash") }
                     .buttonStyle(.link).disabled(site.isEmpty)
+            }
             }
         }
         .padding(16)
@@ -139,6 +146,17 @@ struct NewTabPage: View {
         ScrollView {
             VStack(spacing: 28) {
                 Spacer(minLength: 50)
+                if browser.tor {
+                    VStack(spacing: 10) {
+                        Image(systemName: "network.badge.shield.half.filled")
+                            .font(.system(size: 54, weight: .semibold))
+                            .foregroundStyle(LinearGradient(colors: [.tor, .purple], startPoint: .top, endPoint: .bottom))
+                        Text("Tor Window").font(.system(size: 34, weight: .bold, design: .rounded))
+                        Text("Sites see a Tor address instead of yours. Your network operator sees only that you use Tor.")
+                            .font(.system(size: 14)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
+                        TorStatusLine().padding(.top, 4)
+                    }
+                } else {
                 VStack(spacing: 10) {
                     Image(systemName: "shield.lefthalf.filled")
                         .font(.system(size: 54, weight: .semibold))
@@ -146,6 +164,7 @@ struct NewTabPage: View {
                     Text("Umbra").font(.system(size: 34, weight: .bold, design: .rounded))
                     Text("Private by default. Nothing about you leaves this Mac unless you send it.")
                         .font(.system(size: 14)).foregroundStyle(.secondary)
+                }
                 }
                 Button { browser.focusAddressBar() } label: {
                     HStack(spacing: 10) {
@@ -190,9 +209,15 @@ struct NewTabPage: View {
                 }
 
                 HStack(spacing: 18) {
-                    Label(settings.dns == .system ? "DNS not encrypted" : "Encrypted DNS · \(settings.dns.shortName)", systemImage: "lock.shield")
-                    Label("Each site sealed in its own container", systemImage: "square.on.square.dashed")
-                    Label("Forgotten when you quit", systemImage: "clock.arrow.circlepath")
+                    if browser.tor {
+                        Label("Separate Tor circuit per site", systemImage: "point.3.connected.trianglepath.dotted")
+                        Label("No history", systemImage: "clock.badge.xmark")
+                        Label("Nothing kept after closing", systemImage: "clock.arrow.circlepath")
+                    } else {
+                        Label(settings.dns == .system ? "DNS not encrypted" : "Encrypted DNS · \(settings.dns.shortName)", systemImage: "lock.shield")
+                        Label("Each site sealed in its own container", systemImage: "square.on.square.dashed")
+                        Label("Forgotten when you quit", systemImage: "clock.arrow.circlepath")
+                    }
                 }
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer(minLength: 40)
@@ -223,6 +248,8 @@ struct ProblemView: View {
     @ObservedObject var tab: Tab
     let problem: Tab.Problem
     @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var tor = TorService.shared
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 16) {
@@ -236,6 +263,8 @@ struct ProblemView: View {
                     Button("Continue Without HTTPS") { tab.allowInsecure(u) }
                 case .blocked(let u, _):
                     Button("Load Anyway") { tab.allowBlockedPage(u) }
+                case .needsTor(let u):
+                    Button("Open in Tor Window") { openWindow(id: "tor", value: u) }.keyboardShortcut(.defaultAction)
                 default:
                     Button("Try Again") { tab.reload() }.keyboardShortcut(.defaultAction)
                 }
@@ -249,7 +278,7 @@ struct ProblemView: View {
 
     private var host: String {
         switch problem {
-        case .insecure(let u), .unreachable(let u, _), .blocked(let u, _): return u.host() ?? u.absoluteString
+        case .insecure(let u), .unreachable(let u, _), .blocked(let u, _), .needsTor(let u): return u.host() ?? u.absoluteString
         case .crashed: return tab.site ?? ""
         }
     }
@@ -258,17 +287,19 @@ struct ProblemView: View {
         case .insecure: return "lock.open.trianglebadge.exclamationmark"
         case .unreachable: return "wifi.exclamationmark"
         case .blocked: return "hand.raised.fill"
+        case .needsTor: return "network.badge.shield.half.filled"
         case .crashed: return "exclamationmark.triangle.fill"
         }
     }
     private var color: Color {
-        switch problem { case .blocked: return .umbra; case .crashed: return .orange; default: return .orange }
+        switch problem { case .blocked: return .umbra; case .needsTor: return .tor; case .crashed: return .orange; default: return .orange }
     }
     private var title: String {
         switch problem {
         case .insecure: return "\(host) doesn't support a secure connection"
         case .unreachable: return "Can't open this page"
         case .blocked: return "Umbra blocked this page"
+        case .needsTor: return "Onion sites open in a Tor window"
         case .crashed: return "This page stopped working"
         }
     }
@@ -277,10 +308,21 @@ struct ProblemView: View {
         case .insecure:
             return "Umbra tried the encrypted (HTTPS) version first, but it isn't available. Without it, anyone on your network could see or change what you send to this site."
         case .unreachable(_, let detail):
+            if tab.tor {
+                let status: String
+                switch tor.state {
+                case .failed(let m): status = " " + m
+                case .connecting(let p, _): status = " Tor is still connecting (\(p)%)."
+                default: status = ""
+                }
+                return "\(host) couldn't be reached: \(detail).\(status)"
+            }
             let dns = settings.dns == .system ? "" : " Your lookups are encrypted via \(settings.dns.shortName); if the problem continues, try another DNS provider in Settings."
             return "\(host) couldn't be reached: \(detail).\(dns)"
         case .blocked(_, let h):
             return "\(h) is on a list of known trackers or ad servers. Loading it anyway turns protections off for this site."
+        case .needsTor:
+            return "\(host) is an onion service: it can only be reached through the Tor network. Normal windows never use Tor, so open it in a Tor window."
         case .crashed:
             return "The page used too much memory or hit an error. Reloading usually fixes it."
         }

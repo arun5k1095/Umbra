@@ -5,7 +5,7 @@
 # Umbra
 
 **A fast, native Mac browser that's private by default: every site sealed in its own box,
-trackers blocked and counted, DNS encrypted, nothing sent home.**
+trackers blocked and counted, DNS encrypted, Tor one shortcut away, nothing sent home.**
 
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-blue)
@@ -30,9 +30,33 @@ trackers blocked and counted, DNS encrypted, nothing sent home.**
 | **Anti-fingerprinting** | Canvas and audio readings get per-site noise, the CPU count is generalised, and the user agent matches Safari's. |
 | **No WebRTC IP leaks** | Pages can't discover your real IP address. |
 | **Global Privacy Control** | Tells sites you don't consent to your data being sold. |
+| **Tor windows** | ⇧⌘N opens a window that goes through the Tor network: sites don't see your IP address and your network operator can't see which sites you visit. |
 | **Zero telemetry** | No analytics, crash reports, update checks or search suggestions. Umbra never phones home. |
 
 <p align="center"><img src="docs/images/shield-panel.png" width="340" alt="The shield panel: trackers and ads blocked, servers contacted, encryption status and per-site controls"></p>
+
+## Tor windows
+
+Open one with **File → New Tor Window** (⇧⌘N). Everything in it goes through the
+[Tor network](https://www.torproject.org), using the official Tor program bundled inside Umbra.
+
+<p align="center"><img src="docs/images/tor-window.png" width="860" alt="A Tor window showing DuckDuckGo's onion site, with the Tor badge in the toolbar"></p>
+
+| Who | Normal window | Tor window |
+|---|---|---|
+| **Your network operator** (ISP, mobile carrier, Wi-Fi owner) | sees which sites you visit, not what you do there | sees only that you use Tor |
+| **The sites you visit** | see your IP address (and so your rough location) | see a Tor exit address, different for every site |
+| **Ad and tracker networks** | blocked, and sealed off per site | blocked, and sealed off per site |
+
+- **A separate circuit for every site**, so even the exit addresses can't link your visits.
+- **Separate from normal windows:** its own memory-only containers, no history, nothing kept.
+- **`.onion` sites** work, and show as secure.
+- **New Identity** (⇧⌘U) gives every Tor tab new circuits and empty containers.
+- Tor starts on demand. The first connection takes 15–40 s; later ones about 3 s.
+
+Tor windows hide *where you are* and *where you go*. They don't make Umbra identical to every
+other Tor user the way Tor Browser does, so for protection against powerful adversaries use
+Tor Browser.
 
 ## Fast, because it's native
 
@@ -73,6 +97,8 @@ Requires a Mac with Apple Silicon and macOS 15 or later. To make Umbra your defa
 | | |
 |---|---|
 | ⌘T / ⌘W / ⇧⌘T | New tab / close tab / reopen closed tab |
+| ⌘N / ⇧⌘N | New window / new Tor window |
+| ⇧⌘U | New Tor identity (in a Tor window) |
 | ⌘L | Address bar (type a site or a search) |
 | ⌘[ / ⌘] | Back / forward |
 | ⌘R / ⌘. | Reload / stop |
@@ -103,6 +129,8 @@ How it's tested is in **[docs/TESTING.md](docs/TESTING.md)**.
   block more that can't be counted.
 - **Fingerprinting defenses raise the bar but aren't anonymity.** For protection against
   powerful adversaries, use Tor Browser.
+- **Tor windows are slower** than normal browsing, and don't yet support bridges for networks
+  that block Tor.
 
 ## Build from source
 
@@ -113,9 +141,12 @@ scripts/make-dmg.sh           # → dist/Umbra-<version>.dmg
 scripts/update-filters.sh     # refresh EasyList / EasyPrivacy / Public Suffix List
 ```
 
-Needs Xcode or the Command Line Tools. There are no third-party code dependencies.
+Needs Xcode or the Command Line Tools. There are no third-party code dependencies. The first
+build runs `scripts/fetch-tor.sh`, which downloads the official Tor Expert Bundle and checks it
+against a pinned SHA-256 (and the Tor Project's GPG signature if gpg is installed).
 
 ## License
 
 [MIT](LICENSE). Filter lists: EasyList and EasyPrivacy (GPL-3.0 / CC BY-SA 3.0); site
-boundaries: Public Suffix List (MPL-2.0). See [NOTICE.md](NOTICE.md).
+boundaries: Public Suffix List (MPL-2.0); Tor (BSD-3-Clause, this build GPL-3.0), run as a
+separate program. See [NOTICE.md](NOTICE.md). Umbra isn't affiliated with the Tor Project.

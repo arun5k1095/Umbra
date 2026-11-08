@@ -11,14 +11,16 @@ final class Container {
     let store: WKWebsiteDataStore
     let proxy: SocksProxy
     let persistent: Bool
+    let tor: Bool
     let configuration: WKWebViewConfiguration
     let seed = UInt32.random(in: 1...UInt32.max)      // per-site, per-session fingerprint noise
 
-    init(site: String, store: WKWebsiteDataStore, proxy: SocksProxy, persistent: Bool) {
+    init(site: String, store: WKWebsiteDataStore, proxy: SocksProxy, persistent: Bool, tor: Bool) {
         self.site = site
         self.store = store
         self.proxy = proxy
         self.persistent = persistent
+        self.tor = tor
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = store
         cfg.userContentController = WKUserContentController()
@@ -52,26 +54,41 @@ final class ContainerManager {
 
     var all: [Container] { Array(containers.values) }
 
-    func container(for site: String) -> Container {
-        if let c = containers[site] { return c }
+    /// Tor windows use separate containers: memory-only, never "stay signed in", so nothing
+    /// links what you do in a Tor window to your normal windows.
+    private func key(_ site: String, _ tor: Bool) -> String { tor ? "tor|" + site : site }
+
+    func container(for site: String, tor: Bool = false) -> Container {
+        if let c = containers[key(site, tor)] { return c }
         let settings = AppSettings.shared
         let store: WKWebsiteDataStore
         var persistent = false
-        if let idString = settings.rememberedSites[site], let id = UUID(uuidString: idString) {
+        if !tor, let idString = settings.rememberedSites[site], let id = UUID(uuidString: idString) {
             store = WKWebsiteDataStore(forIdentifier: id)
             persistent = true
         } else {
             store = .nonPersistent()                                    // forgotten when Umbra quits
         }
-        let proxy = (try? SocksProxy(site: site)) ?? (try! SocksProxy(site: site))
+        let proxy = (try? SocksProxy(site: site, tor: tor)) ?? (try! SocksProxy(site: site, tor: tor))
         // Must be set before any page uses this store.
         store.proxyConfigurations = [ProxyConfiguration(socksv5Proxy: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: proxy.port)!))]
-        let c = Container(site: site, store: store, proxy: proxy, persistent: persistent)
-        containers[site] = c
+        let c = Container(site: site, store: store, proxy: proxy, persistent: persistent, tor: tor)
+        containers[key(site, tor)] = c
         return c
     }
 
-    func existing(for site: String) -> Container? { containers[site] }
+    func existing(for site: String, tor: Bool = false) -> Container? { containers[key(site, tor)] }
+
+    /// Re-applies settings to a site's containers in normal and Tor windows.
+    func apply(site: String) { containers.values.filter { $0.site == site }.forEach { $0.apply() } }
+
+    /// New Tor identity: forget every Tor container (cookies, storage, cache).
+    func dropTorContainers() {
+        for (k, c) in containers where c.tor {
+            c.store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
+            containers.removeValue(forKey: k)
+        }
+    }
 
     func register(_ webView: WKWebView) { webViews.add(webView) }
 
@@ -105,9 +122,9 @@ final class ContainerManager {
 
     /// Wipes every non-remembered site's data right now.
     func forgetAllUnremembered() {
-        for (site, c) in containers where !c.persistent {
+        for (k, c) in containers where !c.persistent {
             c.store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
-            containers.removeValue(forKey: site)
+            containers.removeValue(forKey: k)
         }
     }
 }

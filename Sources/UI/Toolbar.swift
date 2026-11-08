@@ -15,6 +15,7 @@ struct ToolbarRow: View {
                       enabled: tab.webView != nil || tab.problem != nil) { tab.isLoading ? tab.stop() : tab.reload() }
                 .padding(.trailing, 4)
 
+            if browser.tor { TorBadge() }
             AddressBar(browser: browser, tab: tab, showShield: $browser.shieldPanelOpen)
 
             if !downloads.items.isEmpty {
@@ -213,6 +214,92 @@ struct SuggestionList: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
         .shadow(color: .black.opacity(0.18), radius: 12, y: 6)
+    }
+}
+
+/// Shows that this is a Tor window and whether Tor is connected; click for details.
+struct TorBadge: View {
+    @ObservedObject private var tor = TorService.shared
+    @State private var show = false
+
+    var body: some View {
+        Button { show.toggle() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "network.badge.shield.half.filled").font(.system(size: 12, weight: .semibold))
+                Text(label).font(.system(size: 11, weight: .semibold)).monospacedDigit()
+            }
+            .foregroundStyle(color)
+            .padding(.horizontal, 9).frame(height: 24)
+            .background(Capsule().fill(color.opacity(0.15)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, 4)
+        .help("Tor connection")
+        .popover(isPresented: $show, arrowEdge: .bottom) { TorPanel().frame(width: 320) }
+    }
+
+    private var label: String {
+        switch tor.state {
+        case .ready: return "Tor"
+        case .connecting(let p, _): return "Tor \(p)%"
+        case .failed: return "Tor ⚠︎"
+        case .off: return "Tor off"
+        }
+    }
+    private var color: Color {
+        switch tor.state { case .ready: return .tor; case .failed: return .orange; default: return .secondary }
+    }
+}
+
+struct TorPanel: View {
+    @ObservedObject private var tor = TorService.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "network.badge.shield.half.filled").font(.system(size: 24, weight: .semibold)).foregroundStyle(Color.tor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Tor Window").font(.headline)
+                    TorStatusLine()
+                }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("• Sites see a Tor exit address, not yours.")
+                Text("• Your network operator sees only that you use Tor, not which sites.")
+                Text("• Every site gets its own circuit and its own memory-only container.")
+                Text("• Nothing from this window is kept: no history, no cookies after you close it.")
+            }
+            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button { tor.newIdentity() } label: { Label("New Identity", systemImage: "arrow.triangle.2.circlepath") }
+                    .disabled(!tor.isReady)
+                    .help("New circuits and empty containers for every tab in Tor windows (⇧⌘U)")
+                Spacer()
+                if !tor.version.isEmpty { Text("Tor \(tor.version)").font(.caption).foregroundStyle(.tertiary) }
+            }
+        }
+        .padding(16)
+    }
+}
+
+struct TorStatusLine: View {
+    @ObservedObject private var tor = TorService.shared
+    var body: some View {
+        switch tor.state {
+        case .ready:
+            Label("Connected to the Tor network", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.subheadline)
+        case .connecting(let p, let s):
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Connecting to Tor… \(p)%").font(.subheadline).foregroundStyle(.secondary)
+                ProgressView(value: Double(p), total: 100).tint(Color.tor).frame(maxWidth: 220)
+                if !s.isEmpty { Text(s).font(.caption2).foregroundStyle(.tertiary).lineLimit(1) }
+            }
+        case .failed(let m):
+            Text(m).font(.subheadline).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+        case .off:
+            Text("Not running").font(.subheadline).foregroundStyle(.secondary)
+        }
     }
 }
 

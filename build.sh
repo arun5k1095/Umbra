@@ -57,6 +57,16 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+echo "• Tor"
+[ -x vendor/tor/tor ] || scripts/fetch-tor.sh
+mkdir -p "$APP/Contents/Helpers"
+cp vendor/tor/tor vendor/tor/libevent-2.1.7.dylib "$APP/Contents/Helpers/"
+mkdir -p "$APP/Contents/Resources/Licenses"
+cp vendor/tor/LICENSE-*.txt "$APP/Contents/Resources/Licenses/"
+
 echo "• Signing (ad-hoc)"
+# The Expert Bundle's own signature is broken by its packaging, so sign the helpers here.
+codesign --force --sign - "$APP/Contents/Helpers/libevent-2.1.7.dylib"
+codesign --force --sign - "$APP/Contents/Helpers/tor"
 codesign --force --sign - "$APP"
 echo "✓ Built $APP (version $VERSION)"

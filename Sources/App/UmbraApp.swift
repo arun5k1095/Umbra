@@ -15,6 +15,14 @@ struct UmbraApp: App {
         .handlesExternalEvents(matching: ["*"])
         .commands { BrowserCommands() }
 
+        // Tor windows: every site goes through the Tor network.
+        WindowGroup("Tor Window", id: "tor", for: URL.self) { $url in
+            BrowserView(initialURL: url, tor: true)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1280, height: 820)
+        .handlesExternalEvents(matching: [])
+
         Settings { SettingsView() }
     }
 }
@@ -49,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         Stats.shared.save()
         ContainerManager.shared.forgetAllUnremembered()
+        TorService.shared.stop()
     }
 }
 
@@ -65,14 +74,21 @@ enum BrowserRegistry {
 
 struct BrowserCommands: Commands {
     @FocusedValue(\.browser) private var browser
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
-        CommandGroup(after: .newItem) {
+        CommandGroup(replacing: .newItem) {
+            Button("New Window") { openWindow(id: "browser") }.keyboardShortcut("n")
+            Button("New Tor Window") { openWindow(id: "tor") }.keyboardShortcut("n", modifiers: [.command, .shift])
+            Divider()
             Button("New Tab") { browser?.newTab() }.keyboardShortcut("t")
             Button("Reopen Closed Tab") { browser?.reopenClosedTab() }.keyboardShortcut("t", modifiers: [.command, .shift])
             Button("Open Location…") { browser?.focusAddressBar() }.keyboardShortcut("l")
             Divider()
             Button("Close Tab") { browser?.closeSelected() }
+            Button("New Tor Identity") { TorService.shared.newIdentity() }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
+                .disabled(browser?.tor != true)
         }
         CommandGroup(after: .textEditing) {
             Divider()

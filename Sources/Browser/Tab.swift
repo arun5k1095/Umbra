@@ -18,6 +18,7 @@ final class Tab: NSObject, ObservableObject, Identifiable {
         case insecure(URL)                       // HTTPS-only: the site has no secure version
         case unreachable(URL, String)
         case blocked(URL, String)                // the page itself is on a block list
+        case needsTor(URL)                       // a .onion address in a normal window
         case crashed
     }
 
@@ -37,6 +38,7 @@ final class Tab: NSObject, ObservableObject, Identifiable {
     @Published var pageZoom: Double = 1
 
     weak var browser: BrowserState?
+    let tor: Bool                                // lives in a Tor window: every site goes through Tor
     private var kvo: [NSKeyValueObservation] = []
     private struct Hop { var webView: WKWebView?; var url: URL; var title: String; var site: String }
     private var back: [Hop] = []
@@ -46,6 +48,7 @@ final class Tab: NSObject, ObservableObject, Identifiable {
 
     init(browser: BrowserState?, url: URL? = nil) {
         self.browser = browser
+        tor = browser?.tor ?? false
         super.init()
         if let url { load(url) }
     }
@@ -53,12 +56,13 @@ final class Tab: NSObject, ObservableObject, Identifiable {
     /// Wraps a popup WebKit created (window.open), so it keeps its link to the opener page.
     init(browser: BrowserState?, adopting wv: WKWebView, site: String) {
         self.browser = browser
+        tor = browser?.tor ?? false
         super.init()
         configure(wv)
         attach(wv, site: site)
     }
 
-    var container: Container? { site.flatMap { ContainerManager.shared.existing(for: $0) } }
+    var container: Container? { site.flatMap { ContainerManager.shared.existing(for: $0, tor: tor) } }
     var isNewTabPage: Bool { webView == nil && problem == nil }
 
     // MARK: Navigation
@@ -68,6 +72,7 @@ final class Tab: NSObject, ObservableObject, Identifiable {
         var target = input
         if AppSettings.shared.cleanLinks, let c = LinkCleaner.clean(target) { target = c; Stats.shared.add(.linkCleaned) }
         if let up = upgrade(target) { target = up }
+        if !tor, target.host()?.isOnionHost == true { return showNeedsTor(target) }
         guard let targetSite = PublicSuffix.shared.site(for: target), target.scheme?.hasPrefix("http") == true else {
             webView?.load(URLRequest(url: target)); return
         }
@@ -80,10 +85,18 @@ final class Tab: NSObject, ObservableObject, Identifiable {
 
     private var hasCommitted: Bool { webView?.backForwardList.currentItem != nil }
 
+    private func showNeedsTor(_ u: URL) {
+        url = u
+        title = u.host() ?? u.absoluteString
+        isLoading = false
+        problem = .needsTor(u)
+    }
+
     /// HTTPS-only: rewrites http:// to https:// unless the host is local or you allowed it.
     private func upgrade(_ u: URL) -> URL? {
         guard AppSettings.shared.httpsOnly, u.scheme == "http", let host = u.host?.lowercased(),
               !PublicSuffix.isLocal(host), !Tab.httpAllowed.contains(host),
+              !host.isOnionHost,                                  // onion addresses are already end-to-end encrypted
               var c = URLComponents(url: u, resolvingAgainstBaseURL: false) else { return nil }
         c.scheme = "https"
         if c.port == 80 { c.port = nil }
@@ -147,7 +160,7 @@ final class Tab: NSObject, ObservableObject, Identifiable {
         if let p = problem {
             problem = nil
             switch p {
-            case .insecure(let u), .unreachable(let u, _), .blocked(let u, _): load(u)
+            case .insecure(let u), .unreachable(let u, _), .blocked(let u, _), .needsTor(let u): load(u)
             case .crashed: webView?.reload()
             }
             return
@@ -203,7 +216,7 @@ final class Tab: NSObject, ObservableObject, Identifiable {
     // MARK: WebView plumbing
 
     private func makeWebView(for site: String) -> WKWebView {
-        let c = ContainerManager.shared.container(for: site)
+        let c = ContainerManager.shared.container(for: site, tor: tor)
         let wv = WKWebView(frame: .zero, configuration: c.configuration)
         configure(wv)
         return wv
@@ -255,7 +268,7 @@ final class Tab: NSObject, ObservableObject, Identifiable {
         if problem == nil || !t.isEmpty { title = t.isEmpty ? (wv.url?.host() ?? "New Tab") : t }
         if wv.url != nil || problem == nil { url = wv.url }
         isLoading = wv.isLoading
-        isSecure = wv.url?.scheme == "https" && wv.hasOnlySecureContent
+        isSecure = (wv.url?.scheme == "https" && wv.hasOnlySecureContent) || (tor && wv.url?.host()?.isOnionHost == true)
         pageZoom = wv.pageZoom
         updateNavState()
     }
@@ -296,6 +309,11 @@ extension Tab: WKNavigationDelegate {
         var changed = false
         if isGET, AppSettings.shared.cleanLinks, let c = LinkCleaner.clean(target) { target = c; changed = true; Stats.shared.add(.linkCleaned) }
         if isGET, let up = upgrade(target) { target = up; changed = true }
+        if !tor, target.host()?.isOnionHost == true {
+            decisionHandler(.cancel, preferences)
+            showNeedsTor(target)
+            return
+        }
 
         let targetSite = PublicSuffix.shared.site(for: target)
         if isGET, let targetSite, targetSite != site {
@@ -343,7 +361,7 @@ extension Tab: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard webView === self.webView else { return }
         updateFromWebView()
-        if let u = webView.url { HistoryStore.shared.record(u, title: title) }
+        if !tor, let u = webView.url { HistoryStore.shared.record(u, title: title) }     // Tor windows keep no history
         loadFavicon(webView)
     }
 
@@ -371,8 +389,13 @@ extension Tab: WKNavigationDelegate {
         isLoading = false
         url = failing                                  // keep what you asked for in the address bar
         title = failing.host() ?? failing.absoluteString
-        if container?.proxy.report.recentlyBlocked(host) == true {
+        if tor, !TorLive.shared.isReady {
+            problem = .unreachable(failing, "Umbra isn't connected to the Tor network yet")
+        } else if container?.proxy.report.recentlyBlocked(host) == true
+                    || (e.domain == "WebKitErrorDomain" && e.code == 104) {      // stopped by WebKit's content rules
             problem = .blocked(failing, host)
+        } else if tor, e.domain == NSURLErrorDomain, [NSURLErrorTimedOut, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost].contains(e.code) {
+            problem = .unreachable(failing, "the Tor circuit couldn't reach it. Tor is slower than a direct connection and trying again often works")
         } else if upgradedHosts.contains(host), Self.secureFailureCodes.contains(e.code) {
             problem = .insecure(failing)
         } else if e.domain == NSURLErrorDomain && [NSURLErrorBadURL, NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed].contains(e.code) {

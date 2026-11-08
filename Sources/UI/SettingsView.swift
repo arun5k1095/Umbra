@@ -97,7 +97,7 @@ private struct SitesSettings: View {
                     HStack {
                         Text(site)
                         Spacer()
-                        Button("Turn back on") { s.shieldsOff.remove(site); ContainerManager.shared.existing(for: site)?.apply() }.buttonStyle(.link)
+                        Button("Turn back on") { s.shieldsOff.remove(site); ContainerManager.shared.apply(site: site) }.buttonStyle(.link)
                     }
                 }
             }

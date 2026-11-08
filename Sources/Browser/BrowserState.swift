@@ -10,11 +10,14 @@ final class BrowserState: ObservableObject {
     @Published var findVisible = false
     @Published var shieldPanelOpen = false
     weak var window: NSWindow?
+    let tor: Bool                               // a Tor window: all tabs go through Tor
     private var closed: [URL] = []
     private var timer: Timer?
 
-    init(initialURL: URL? = nil) {
+    init(initialURL: URL? = nil, tor: Bool = false) {
+        self.tor = tor
         BrowserRegistry.register(self)
+        if tor { TorService.shared.start() }
         newTab(url: initialURL)
         // Refreshes the shield badge of the visible tab. Cheap: reads one counter.
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in

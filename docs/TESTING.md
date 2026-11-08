@@ -38,6 +38,26 @@ results record whether the window was visible.
 | Speed | 5 sites, each loaded twice per browser in alternating order, averaged |
 | Error pages | an unreachable host shows Umbra's explanation page |
 
+### Tor windows (live Tor network)
+
+Run only these with `UMBRA_SELFTEST_SUITE=tor`. Tor's first start takes 15–40 s; later starts
+use its cached directory and take about 3 s.
+
+| Check | How |
+|---|---|
+| Tor window opens | a window with `BrowserView(tor: true)` |
+| Connects to Tor | bundled Tor reaches "Bootstrapped 100%" within 150 s |
+| Normal windows don't use Tor | check.torproject.org/api/ip says `IsTor: false` |
+| Tor traffic exits through Tor | the same page in the Tor window says `IsTor: true`, with a different IP |
+| A circuit per site | check.torproject.org and api.ipify.org see different exit addresses |
+| Separate from normal windows | a cookie set on example.com in a normal window isn't visible in the Tor window; the Tor container is memory-only |
+| Tracker pages blocked | google-analytics.com/analytics.js shows "Umbra blocked this page" |
+| Trackers blocked over Tor | theverge.com in the Tor window: trackers and ads refused and counted |
+| Onion sites | DuckDuckGo's `.onion` loads and shows as secure |
+| No history | Tor-window visits aren't in history; normal-window visits are |
+| `.onion` in a normal window | shows "Onion sites open in a Tor window" instead of leaking a lookup |
+| New Identity | fresh containers, and a new exit address |
+
 ## Tools
 
 ```bash

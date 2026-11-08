@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import WebKit
 
 /// Automated end-to-end checks against real websites. Runs only when Umbra is launched with
@@ -36,6 +37,10 @@ enum SelfTest {
         }
         window.setContentSize(NSSize(width: 1280, height: 800))
         check("startup", true, "content rules: \(ContentRules.shared.ruleCounts), domain rules: \(Blocker.shared.ruleCount)")
+        if ProcessInfo.processInfo.environment["UMBRA_SELFTEST_SUITE"] == "tor" {
+            await runTor(dir, normal: tab)
+            return finish(dir)
+        }
         await sleep(1)
         await snapshot(window, browser, "01-new-tab", dir)
 
@@ -155,7 +160,115 @@ enum SelfTest {
         browser.newTab()
         await sleep(1.5)
         await snapshot(window, browser, "06-new-tab-stats", dir)
+
+        // 11. Tor windows
+        await runTor(dir, normal: tab)
         finish(dir)
+    }
+
+    // MARK: Tor windows
+
+    private static var torWindow: NSWindow?
+
+    private static func runTor(_ dir: URL, normal: Tab) async {
+        // Open a Tor window the way the menu does: a window showing BrowserView(tor: true).
+        let w = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1280, height: 800),
+                         styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        w.contentView = NSHostingView(rootView: BrowserView(tor: true))
+        w.isReleasedWhenClosed = false
+        w.makeKeyAndOrderFront(nil)
+        torWindow = w
+        guard await waitFor(10, { BrowserRegistry.all.contains { $0.tor && $0.window != nil } }),
+              let tb = BrowserRegistry.all.first(where: \.tor), let tw = tb.window, let tt = tb.selected else {
+            return check("Tor window opens", false)
+        }
+        check("Tor window opens", tt.tor && tb.tor)
+        let t0 = Date()
+        let ready = await waitFor(150) { TorService.shared.isReady }
+        let bootSecs = Date().timeIntervalSince(t0)
+        check("connects to the Tor network", ready, String(format: "%.1f s, Tor %@, state %@", bootSecs, TorService.shared.version, "\(TorService.shared.state)"))
+        notes["tor-bootstrap-seconds"] = String(format: "%.1f", bootSecs)
+        await sleep(1)
+        await snapshot(tw, tb, "10-tor-new-tab", dir)
+        guard ready else { return }
+
+        // Exit address: normal window direct, Tor window through Tor.
+        await load(normal, "https://check.torproject.org/api/ip", settle: 0.5)
+        let directIP = (await evalString(normal.webView, "JSON.parse(document.body.innerText).IP")) ?? "?"
+        let directTor = (await evalString(normal.webView, "String(JSON.parse(document.body.innerText).IsTor)")) ?? "?"
+        let t1 = Date()
+        await loadSlow(tt, "https://check.torproject.org/api/ip")
+        let torMs = Date().timeIntervalSince(t1) * 1000
+        let torIP = (await evalString(tt.webView, "JSON.parse(document.body.innerText).IP")) ?? "?"
+        let isTor = (await evalString(tt.webView, "String(JSON.parse(document.body.innerText).IsTor)")) ?? "?"
+        check("normal windows don't use Tor", directTor == "false", "IsTor=\(directTor)")
+        check("Tor window traffic exits through Tor", isTor == "true" && torIP != directIP && torIP != "?",
+              "IsTor=\(isTor), exit \(torIP) (\(Int(torMs)) ms)")
+        notes["tor-first-page-ms"] = String(Int(torMs))
+
+        // A different site gets a different circuit (so usually a different exit address).
+        await loadSlow(tt, "https://api.ipify.org/?format=json")
+        let otherIP = (await evalString(tt.webView, "JSON.parse(document.body.innerText).ip")) ?? "?"
+        check("each site gets its own Tor circuit", otherIP != "?" && otherIP != torIP,
+              "check.torproject.org exit \(torIP), ipify.org exit \(otherIP)")
+
+        // Tor containers are separate from normal ones, even for the same site.
+        await load(normal, "https://example.com/")
+        _ = await evalString(normal.webView, "document.cookie = 'umbra_normal=1; max-age=3600; secure'; document.cookie")
+        await loadSlow(tt, "https://example.com/")
+        let torCookie = (await evalString(tt.webView, "document.cookie")) ?? "?"
+        let nc = ContainerManager.shared.existing(for: "example.com"), tc = ContainerManager.shared.existing(for: "example.com", tor: true)
+        check("Tor window doesn't share cookies with normal windows", tt.title == "Example Domain" && !torCookie.contains("umbra_normal")
+              && nc != nil && tc != nil && nc!.store !== tc!.store && tc!.store.isPersistent == false,
+              "title=\(tt.title) cookie='\(torCookie)'")
+
+        // Trackers are still blocked and counted, before anything reaches Tor.
+        await loadSlow(tt, "https://www.google-analytics.com/analytics.js")
+        if case .blocked = tt.problem { check("tracker pages show as blocked", true) }
+        else { check("tracker pages show as blocked", false, "\(String(describing: tt.problem))") }
+        let t3 = Date()
+        await loadSlow(tt, "https://www.theverge.com/", timeout: 90)
+        let vs = tt.container?.proxy.report.snapshot()
+        check("blocks trackers in Tor windows", (vs?.trackers ?? 0) + (vs?.ads ?? 0) > 0,
+              "trackers=\(vs?.trackers ?? 0) ads=\(vs?.ads ?? 0) title=\(tt.title) (\(Int(Date().timeIntervalSince(t3) * 1000)) ms)")
+        notes["tor-verge-ms"] = String(Int(Date().timeIntervalSince(t3) * 1000))
+
+        // Onion services.
+        let onion = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/"
+        let t2 = Date()
+        await loadSlow(tt, onion, timeout: 75)
+        check("opens .onion sites", tt.title.localizedCaseInsensitiveContains("DuckDuckGo") && tt.isSecure,
+              "title=\(tt.title) secure=\(tt.isSecure) problem=\(String(describing: tt.problem)) (\(Int(Date().timeIntervalSince(t2) * 1000)) ms)")
+        await snapshot(tw, tb, "11-tor-onion", dir)
+        check("Tor window keeps no history", HistoryStore.shared.suggestions(for: "ipify").isEmpty
+              && HistoryStore.shared.suggestions(for: "duckduckgogg42").isEmpty && HistoryStore.shared.suggestions(for: "example.com").count > 0,
+              "normal-window history still works: \(HistoryStore.shared.suggestions(for: "example.com").count) entries")
+        await load(normal, onion, settle: 0.3)
+        if case .needsTor = normal.problem { check("normal windows send .onion to a Tor window", true) }
+        else { check("normal windows send .onion to a Tor window", false, "\(String(describing: normal.problem))") }
+
+        // New identity: new circuits and fresh containers.
+        await loadSlow(tt, "https://api.ipify.org/?format=json")
+        let before = ContainerManager.shared.existing(for: "ipify.org", tor: true)
+        let ipBefore = (await evalString(tt.webView, "JSON.parse(document.body.innerText).ip")) ?? "?"
+        TorService.shared.newIdentity()
+        await waitLoadedSlow(tt, timeout: 60)
+        let after = ContainerManager.shared.existing(for: "ipify.org", tor: true)
+        let ipAfter = (await evalString(tt.webView, "JSON.parse(document.body.innerText).ip")) ?? "?"
+        check("New Identity gives fresh containers and circuits", before != nil && after != nil && before !== after && ipAfter != "?",
+              "exit \(ipBefore) → \(ipAfter)")
+        await snapshot(tw, tb, "12-tor-page", dir)
+    }
+
+    private static func loadSlow(_ tab: Tab, _ s: String, timeout: Double = 60) async {
+        tab.load(URL(string: s)!)
+        await waitLoadedSlow(tab, timeout: timeout)
+    }
+
+    private static func waitLoadedSlow(_ tab: Tab, timeout: Double) async {
+        await sleep(0.5)
+        _ = await waitFor(timeout) { !tab.isLoading || tab.problem != nil }
+        await sleep(0.8)
     }
 
     // MARK: helpers

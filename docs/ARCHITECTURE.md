@@ -142,14 +142,48 @@ Before a page loads (`decidePolicyFor navigationAction`), Umbra:
 Nothing except what you ask for. There is no telemetry, no crash reporting, no update check and
 no search suggestions (typing never leaves the Mac until you press Return). The only traffic
 Umbra starts on its own is encrypted DNS (resolver timing at launch, plus a keep-alive), and
-site icons, which go through the site's own container proxy with no cookies. Downloads are
+site icons, which go through the site's own container proxy with no cookies. Tor connects to
+the Tor network only after you open a Tor window. Downloads are
 tagged as coming from the web, so Gatekeeper checks them.
 
 Data on disk: settings, bookmarks, aggregate daily counters (numbers only: never sites or
 domains), the list of "stay signed in" sites with their WebKit data stores, and history only if
 you turn on "Remember history".
 
-## 8. Limitations
+## 8. Tor windows
+
+File → New Tor Window (⇧⌘N) opens a window whose every site goes through the Tor network
+(`Sources/Privacy/Tor.swift`).
+
+- **The Tor program** is the official Tor Expert Bundle, fetched by `scripts/fetch-tor.sh`
+  (pinned SHA-256, plus the Tor Browser Developers' GPG signature when gpg is installed) and
+  bundled in `Contents/Helpers/`. Umbra starts it the first time a Tor window opens, with a
+  SOCKS port on `127.0.0.1` chosen by Tor, and reads its progress from Tor's log. It stops
+  when Umbra quits; if Umbra crashes, `__OwningControllerProcess` makes Tor exit too. Tor's
+  data folder (`~/Library/Application Support/Umbra/Tor`) holds only Tor's relay directory
+  cache and guard choice, which makes later starts take about 3 s instead of 15–40 s.
+- **Chaining:** Tor windows have their own containers, and each container's proxy works as
+  before (blocking and counting first). Then, instead of encrypted DNS and a direct
+  connection, it opens a SOCKS5 connection to Tor and asks for the **hostname**, so the name
+  is resolved at the Tor exit and no DNS lookup leaves the Mac. A request Tor fails right
+  away is retried once on a fresh circuit.
+- **A circuit per site:** the proxy authenticates to Tor with the site as the username and a
+  per-session key as the password. Tor's `IsolateSOCKSAuth` puts different credentials on
+  different circuits, so two sites see different exit addresses and can't link your visits.
+  **New Identity** (⇧⌘U) changes the key and empties every Tor container.
+- **Separation from normal windows:** a site in a Tor window gets a different container from
+  the same site in a normal window, always memory-only (no "Stay signed in"). Tor windows
+  keep no history, and links from other apps never open in a Tor window.
+- **Onion services:** `.onion` addresses skip the HTTPS upgrade (onion connections are
+  already end-to-end encrypted) and show as secure. In a normal window, Umbra never tries to
+  look one up: it explains and offers to open the address in a Tor window.
+
+What Tor windows **don't** do: they don't make Umbra look like Tor Browser. Tor Browser
+makes every user look identical (window size, fonts, user agent). Umbra's fingerprint
+defenses are weaker, so a determined site could still tell Umbra users apart. For
+anonymity against strong adversaries, use Tor Browser.
+
+## 9. Limitations
 
 - **No HTTP/3** through the proxy (TCP only).
 - **No extensions**, no password AutoFill (WKWebView doesn't offer them to third-party apps), no
@@ -160,3 +194,6 @@ you turn on "Remember history".
   determined fingerprinter can still use screen size, fonts and timing. For anonymity against
   strong adversaries, use Tor Browser.
 - **IPv4 is preferred**; IPv6 is used when a host has no IPv4 address.
+- **Tor windows** are slower than direct browsing (every connection crosses three relays),
+  don't support bridges for networks that block Tor, and don't provide Tor Browser's
+  uniform fingerprint.

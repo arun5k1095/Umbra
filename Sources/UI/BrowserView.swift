@@ -6,13 +6,24 @@ extension Color {
     static let umbra = Color(red: 0.40, green: 0.33, blue: 0.93)
     static let chrome = Color(nsColor: .windowBackgroundColor)
     static let surface = Color(nsColor: .controlBackgroundColor)
+    static let tor = Color(red: 0.49, green: 0.27, blue: 0.62)
+    /// Tor windows get a violet-tinted frame so you always know which kind of window you're in.
+    static let torChrome = Color(nsColor: NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(red: 0.17, green: 0.12, blue: 0.24, alpha: 1)
+            : NSColor(red: 0.91, green: 0.88, blue: 0.97, alpha: 1)
+    })
 }
 
 struct BrowserView: View {
     @StateObject private var browser: BrowserState
     @ObservedObject private var settings = AppSettings.shared
 
-    init(initialURL: URL? = nil) { _browser = StateObject(wrappedValue: BrowserState(initialURL: initialURL)) }
+    private let tor: Bool
+    init(initialURL: URL? = nil, tor: Bool = false) {
+        self.tor = tor
+        _browser = StateObject(wrappedValue: BrowserState(initialURL: initialURL, tor: tor))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,11 +41,11 @@ struct BrowserView: View {
                 }
             }
         }
-        .background(Color.chrome)
+        .background(tor ? Color.torChrome : Color.chrome)
         .ignoresSafeArea(.container, edges: .top)
         .background(WindowAccessor { browser.window = $0 })
         .focusedSceneValue(\.browser, browser)
-        .onOpenURL { browser.newTab(url: $0) }
+        .onOpenURL { if !tor { browser.newTab(url: $0) } }       // links from other apps never open over Tor by surprise
         .frame(minWidth: 640, minHeight: 420)
     }
 }

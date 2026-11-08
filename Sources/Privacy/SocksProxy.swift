@@ -65,6 +65,7 @@ final class SiteReport: @unchecked Sendable {
 /// only ever sees host names and ports, never page content.
 final class SocksProxy: @unchecked Sendable {
     let site: String
+    let tor: Bool                     // Tor window: relay through the bundled Tor instead of connecting directly
     let report = SiteReport()
     private(set) var port: UInt16 = 0
     private let listener: NWListener
@@ -73,9 +74,10 @@ final class SocksProxy: @unchecked Sendable {
     private var relayObjects: [ObjectIdentifier: Relay] = [:]
     private let lock = NSLock()
 
-    init(site: String) throws {
+    init(site: String, tor: Bool = false) throws {
         self.site = site
-        queue = DispatchQueue(label: "umbra.proxy.\(site)", qos: .userInitiated)
+        self.tor = tor
+        queue = DispatchQueue(label: "umbra.proxy.\(tor ? "tor." : "")\(site)", qos: .userInitiated)
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
         params.allowLocalEndpointReuse = true
@@ -140,7 +142,7 @@ private final class Relay: @unchecked Sendable {
     private func readExact(_ n: Int, _ next: @escaping ([UInt8]) -> Void) {
         if n == 0 { next([]); return }
         client.receive(minimumIncompleteLength: n, maximumLength: n) { [weak self] data, _, _, err in
-            guard let self, err == nil, let data, data.count == n else { self?.close(); return }
+            guard err == nil, let data, data.count == n else { self?.close(); return }
             next([UInt8](data))
         }
     }
@@ -171,6 +173,7 @@ private final class Relay: @unchecked Sendable {
             return reply(2)                                              // "not allowed by ruleset"
         }
         proxy.report.recordAllowed(host.lowercased())
+        if proxy.tor { return viaTor(host, port, site: proxy.site, attempt: 0) }
         let provider = LivePrivacy.shared.config.dns
         DoHResolver.shared.resolve(host, provider: provider) { [weak self] result in
             guard let self else { return }
@@ -215,6 +218,79 @@ private final class Relay: @unchecked Sendable {
             }
         }
         r.start(queue: q)
+    }
+
+    // MARK: Tor
+
+    /// Hands the connection to Tor by hostname, so Tor resolves it at the exit (no DNS leaves
+    /// this Mac). The SOCKS username is the site, so Tor keeps each site on its own circuit.
+    private func viaTor(_ host: String, _ port: UInt16, site: String, attempt: Int) {
+        TorLive.shared.whenReady(timeout: 120, queue: q) { [weak self] torPort in
+            guard let self, !self.closed else { return }
+            guard let torPort, let p = NWEndpoint.Port(rawValue: torPort) else { return self.reply(1) }
+            let tcp = NWProtocolTCP.Options()
+            tcp.noDelay = true
+            let t = NWConnection(host: "127.0.0.1", port: p, using: NWParameters(tls: nil, tcp: tcp))
+            self.remote = t
+            t.stateUpdateHandler = { [weak self] s in
+                switch s {
+                case .ready: self?.torHandshake(t, host, port, site: site, attempt: attempt)
+                case .failed, .waiting: t.cancel(); self?.reply(1)
+                default: break
+                }
+            }
+            t.start(queue: self.q)
+        }
+    }
+
+    private func torHandshake(_ t: NWConnection, _ host: String, _ port: UInt16, site: String, attempt: Int) {
+        t.stateUpdateHandler = { [weak self] s in if case .failed = s { self?.close() } }
+        let user = Array(site.utf8.prefix(255)), pass = Array(TorLive.shared.isolationKey.utf8.prefix(255))
+        let name = Array(host.utf8.prefix(255))
+        var connect: [UInt8] = [5, 1, 0, 3, UInt8(name.count)] + name
+        connect += [UInt8(port >> 8), UInt8(port & 0xff)]
+        let started = Date()
+        t.send(content: Data([5, 1, 2]), completion: .idempotent)                       // username/password auth only
+        read(t, 2) { [self] m in
+            guard m == [5, 2] else { return reply(1) }
+            t.send(content: Data([1, UInt8(user.count)] + user + [UInt8(pass.count)] + pass), completion: .idempotent)
+            read(t, 2) { [self] a in
+                guard a[1] == 0 else { return reply(1) }
+                t.send(content: Data(connect), completion: .idempotent)
+                read(t, 4) { [self] h in
+                    let rep = h[1]
+                    let rest: (@escaping ([UInt8]) -> Void) -> Void = { next in
+                        switch h[3] {
+                        case 1: self.read(t, 6, next)
+                        case 4: self.read(t, 18, next)
+                        case 3: self.read(t, 1) { l in self.read(t, Int(l[0]) + 2, next) }
+                        default: self.reply(1)
+                        }
+                    }
+                    rest { [self] _ in
+                        if rep == 0 {
+                            client.send(content: Data([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]), completion: .contentProcessed { [weak self] _ in
+                                guard let self else { return }
+                                self.pump(from: self.client, to: t)
+                                self.pump(from: t, to: self.client)
+                            })
+                        } else if attempt == 0, [1, 6].contains(rep), Date().timeIntervalSince(started) < 20 {
+                            t.cancel()                                                     // a fresh circuit often works
+                            viaTor(host, port, site: site, attempt: 1)
+                        } else {
+                            reply(rep <= 8 ? rep : 1)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func read(_ c: NWConnection, _ n: Int, _ next: @escaping ([UInt8]) -> Void) {
+        c.receive(minimumIncompleteLength: n, maximumLength: n) { [weak self] data, _, _, err in
+            guard err == nil, let data, data.count == n else { self?.reply(1); return }
+            next([UInt8](data))
+        }
     }
 
     private func pump(from: NWConnection, to: NWConnection) {
